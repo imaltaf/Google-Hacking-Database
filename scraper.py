@@ -1,75 +1,120 @@
 # scraper.py
 import os
 import csv
+import time
 from datetime import datetime
 import telegram
 from dotenv import load_dotenv
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.chrome.options import Options
 
 load_dotenv()
 
 class GHDBScraper:
     def __init__(self):
+        self.base_url = "https://www.exploit-db.com/google-hacking-database"
         self.telegram_bot = telegram.Bot(token=os.getenv('TELEGRAM_BOT_TOKEN'))
         self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.output_dir = 'data'
         
-        # Create data directory if it doesn't exist
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
-    def parse_ghdb_data(self):
-        """Parse the sample GHDB data"""
-        # Sample data provided
-        sample_data = """Show 15 Quick Search Date Added Dork Category Author
-2003-06-24 "Index of /backup" Sensitive Directories anonymous
-2003-06-24 "powered by openbsd" +"powered by apache" Web Server Detection anonymous
-2003-06-24 "# Dumping data for table" Files Containing Juicy Info anonymous
-2003-06-24 intitle:index.of intext:"secring.skr"|"secring.pgp"|"secring.bak" Files Containing Passwords anonymous
-2003-06-24 intitle:index.of passwd passwd.bak Files Containing Passwords anonymous
-2003-06-24 intitle:index.of master.passwd Files Containing Passwords anonymous
-2003-06-24 intitle:"Index of" pwd.db Files Containing Passwords anonymous
-2003-06-24 intitle:"Index of" dbconvert.exe chats Files Containing Juicy Info anonymous
-2003-06-24 "cacheserverreport for" "This analysis was produced by calamaris" Files Containing Juicy Info anonymous
-2003-06-24 intitle:"Index of" ".htpasswd" htpasswd.bak Files Containing Passwords anonymous"""
+    def setup_driver(self):
+        """Setup Chrome driver with appropriate options"""
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        return webdriver.Chrome(options=chrome_options)
 
+    def wait_for_table_load(self, driver):
+        """Wait for the table to load completely"""
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "table.dt-table"))
+            )
+            time.sleep(2)  # Allow for any dynamic content to load
+        except TimeoutException:
+            self.send_telegram_notification("Timeout waiting for table to load")
+            raise
+
+    def get_total_pages(self, driver):
+        """Get the total number of pages"""
+        try:
+            pagination_info = driver.find_element(By.CSS_SELECTOR, "#exploits-table_info").text
+            total_entries = int(pagination_info.split()[-2].replace(',', ''))
+            entries_per_page = int(pagination_info.split()[1])
+            return (total_entries + entries_per_page - 1) // entries_per_page
+        except Exception as e:
+            self.send_telegram_notification(f"Error getting total pages: {str(e)}")
+            raise
+
+    def parse_table_data(self, driver):
+        """Parse the current page's table data"""
         data = []
-        for line in sample_data.split('\n')[1:]:  # Skip header
-            if line.strip():
-                parts = line.strip().split('" ')
-                if len(parts) > 1:
-                    # Handle quoted dorks
-                    date = parts[0].split()[0]
-                    dork = parts[0].split('"')[1]
-                    remaining = ' '.join(parts[1:]).strip()
-                else:
-                    # Handle unquoted dorks
-                    parts = line.strip().split()
-                    date = parts[0]
-                    # Find where the category starts (it's usually 2-3 words)
-                    for i in range(len(parts)-3, 1, -1):
-                        if ' '.join(parts[i:i+2]) in ["Containing Passwords", "Containing Juicy", "Server Detection", "Directories anonymous"]:
-                            dork = ' '.join(parts[1:i])
-                            remaining = ' '.join(parts[i:])
-                            break
-
-                # Split remaining into category and author
-                category_parts = remaining.split()
-                author = category_parts[-1]
-                category = ' '.join(category_parts[:-1])
-
-                data.append({
-                    'date_added': date,
-                    'dork': dork,
-                    'category': category,
-                    'author': author
-                })
+        rows = driver.find_elements(By.CSS_SELECTOR, "table.dt-table tbody tr")
         
+        for row in rows:
+            try:
+                cols = row.find_elements(By.TAG_NAME, "td")
+                if len(cols) >= 4:
+                    data.append({
+                        'date_added': cols[0].text.strip(),
+                        'dork': cols[1].text.strip(),
+                        'category': cols[2].text.strip(),
+                        'author': cols[3].text.strip()
+                    })
+            except Exception as e:
+                print(f"Error parsing row: {str(e)}")
+                continue
+                
         return data
 
+    def scrape_all_pages(self):
+        """Scrape data from all pages"""
+        driver = self.setup_driver()
+        all_data = []
+        
+        try:
+            driver.get(self.base_url)
+            self.wait_for_table_load(driver)
+            total_pages = self.get_total_pages(driver)
+            
+            self.send_telegram_notification(f"Starting scrape of {total_pages} pages...")
+            
+            for page in range(1, total_pages + 1):
+                try:
+                    if page > 1:
+                        next_button = driver.find_element(By.CSS_SELECTOR, "#exploits-table_next")
+                        if "disabled" not in next_button.get_attribute("class"):
+                            next_button.click()
+                            self.wait_for_table_load(driver)
+                    
+                    page_data = self.parse_table_data(driver)
+                    all_data.extend(page_data)
+                    
+                    if page % 10 == 0:
+                        self.send_telegram_notification(f"Scraped {page}/{total_pages} pages...")
+                
+                except Exception as e:
+                    self.send_telegram_notification(f"Error on page {page}: {str(e)}")
+                    continue
+            
+            return all_data
+            
+        finally:
+            driver.quit()
+
     def save_to_csv(self, data):
-        """Save the data to a CSV file with timestamp in filename"""
+        """Save all data to a single CSV file"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'{self.output_dir}/ghdb_data_{timestamp}.csv'
+        filename = f'{self.output_dir}/complete_ghdb_data_{timestamp}.csv'
         
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
@@ -92,8 +137,8 @@ class GHDBScraper:
     def run(self):
         """Main execution method"""
         try:
-            print("Starting GHDB data extraction...")
-            data = self.parse_ghdb_data()
+            print("Starting complete GHDB data extraction...")
+            data = self.scrape_all_pages()
             
             csv_file = self.save_to_csv(data)
             
