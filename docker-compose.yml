@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}  # Use your .env or environment variables
+      CHAT_ID: ${CHAT_ID}
+    volumes:
+      - ./app:/app
+    ports:
+      - "5000:5000"  # Map Flask server port
+    command: python main.py
