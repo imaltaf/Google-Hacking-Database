@@ -1,15 +1,10 @@
-version: "3.8"
-
+version: '3.8'
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  ghdb-scraper:
+    build: .
     environment:
-      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}  # Use your .env or environment variables
-      CHAT_ID: ${CHAT_ID}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
     volumes:
-      - ./app:/app
-    ports:
-      - "5000:5000"  # Map Flask server port
-    command: python main.py
+      - ./data:/app/data
+    restart: unless-stopped
